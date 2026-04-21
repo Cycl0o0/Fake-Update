@@ -483,6 +483,9 @@ func detectPowerState() string {
 	if err != nil {
 		return ""
 	}
+	mainsOnline := false
+	hasDischarging := false
+	hasACBattery := false
 	for _, entry := range powerEntries {
 		base := "/sys/class/power_supply/" + entry.Name()
 		typeData, err := os.ReadFile(base + "/type")
@@ -493,19 +496,28 @@ func detectPowerState() string {
 		case "Mains", "USB", "USB_C":
 			state, err := os.ReadFile(base + "/online")
 			if err == nil && strings.TrimSpace(string(state)) == "1" {
-				return "AC"
+				mainsOnline = true
 			}
 		case "Battery":
 			status, err := os.ReadFile(base + "/status")
 			if err == nil {
 				switch strings.ToLower(strings.TrimSpace(string(status))) {
 				case "discharging":
-					return "BAT"
-				case "charging", "full", "not charging":
-					return "AC"
+					hasDischarging = true
+				case "charging", "full":
+					hasACBattery = true
 				}
 			}
 		}
+	}
+	if mainsOnline {
+		return "AC"
+	}
+	if hasDischarging {
+		return "BAT"
+	}
+	if hasACBattery {
+		return "AC"
 	}
 	return ""
 }
