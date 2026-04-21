@@ -1036,7 +1036,7 @@ func appendLogAI(buf []LogLine, aiGen *aiLogGenerator, cfg Config, profile Updat
 	if aiLine, ok := aiGen.getLine(); ok {
 		aiLine.text = fmt.Sprintf("[%s] %s", ts, aiLine.text)
 		buf = append(buf, aiLine)
-	} else {
+	} else if !aiGen.active {
 		line := buildOSLogLine(ts, cfg, profile, metrics, frame, stageIdx, stage)
 		buf = append(buf, line)
 	}
@@ -1858,14 +1858,19 @@ func containsAny(s string, values ...string) bool {
 // ====================== AI LOG GENERATOR ======================
 
 type aiLogGenerator struct {
-	mu       sync.Mutex
-	buf      []LogLine
-	cfg      Config
-	profile  UpdateProfile
-	apiKey   string
-	client   *http.Client
-	active   bool
-	fetching bool
+	mu           sync.Mutex
+	buf          []LogLine
+	cfg          Config
+	profile      UpdateProfile
+	apiKey       string
+	client       *http.Client
+	active       bool
+	fetching     bool
+	curStage     int
+	stageHist    []LogLine
+	stageCount   int
+	loopIdx      int
+	stageCap     int
 }
 
 func newAILogGenerator(cfg Config, profile UpdateProfile) *aiLogGenerator {
@@ -1874,11 +1879,13 @@ func newAILogGenerator(cfg Config, profile UpdateProfile) *aiLogGenerator {
 		return &aiLogGenerator{active: false}
 	}
 	gen := &aiLogGenerator{
-		cfg:     cfg,
-		profile: profile,
-		apiKey:  apiKey,
-		client:  &http.Client{Timeout: 10 * time.Second},
-		active:  true,
+		cfg:      cfg,
+		profile:  profile,
+		apiKey:   apiKey,
+		client:   &http.Client{Timeout: 10 * time.Second},
+		active:   true,
+		curStage: -1,
+		stageCap: 1000,
 	}
 	// Pre-fetch initial batch
 	go gen.fetchBatch(0, 0, "Initializing")
@@ -1891,11 +1898,21 @@ func (g *aiLogGenerator) getLine() (LogLine, bool) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// If we've hit the cap for this stage, loop through history
+	if g.stageCount >= g.stageCap && len(g.stageHist) > 0 {
+		line := g.stageHist[g.loopIdx%len(g.stageHist)]
+		g.loopIdx++
+		return line, true
+	}
+
 	if len(g.buf) == 0 {
 		return LogLine{}, false
 	}
 	line := g.buf[0]
 	g.buf = g.buf[1:]
+	g.stageHist = append(g.stageHist, line)
+	g.stageCount++
 	return line, true
 }
 
@@ -1904,7 +1921,13 @@ func (g *aiLogGenerator) ensureBuffer(stageIdx int, totalStages int, stage strin
 		return
 	}
 	g.mu.Lock()
-	needFetch := len(g.buf) < 5 && !g.fetching
+	if stageIdx != g.curStage {
+		g.curStage = stageIdx
+		g.stageHist = g.stageHist[:0]
+		g.stageCount = 0
+		g.loopIdx = 0
+	}
+	needFetch := len(g.buf) < 5 && !g.fetching && g.stageCount < g.stageCap
 	g.mu.Unlock()
 	if needFetch {
 		go g.fetchBatch(stageIdx, totalStages, stage)
